@@ -40,21 +40,13 @@ final class TranscriptionViewModel: ObservableObject {
     private var microphoneSource: MicrophoneSource?
     private var systemSource: SystemAudioSource?
     private var micTestSource: MicrophoneSource?
-    private var transcriber: SpeechTranscriber?
+    private var engine: SpeechEngine?
 
-    /// Estado de la segmentación local. El reconocedor entrega un único texto
-    /// creciente por generación; los segmentos tipo subtítulo se cortan acá,
-    /// llevando la cuenta de cuántos caracteres ya fueron "consumidos" por
-    /// segmentos cerrados. Cortar un segmento no toca el motor de
-    /// reconocimiento: solo mueve ese offset.
-    private var currentGeneration: UUID?
-    private var generationStartedAt: Date?
-    private var consumedCharacters = 0
-    private var lastFullText = ""
+    /// `SpeechEngine` entrega una frase por vez (no el acumulado de la
+    /// sesión), con `isFinal` marcando cuándo está definitiva — Apple decide
+    /// los cortes de frase por su cuenta, así que acá solo hace falta llevar
+    /// cuál es la fila de la tabla que sigue abierta.
     private var openSegmentID: UUID?
-    private var lastPartialAt: Date?
-    private var segmentStartedAt: Date?
-    private var monitorTask: Task<Void, Never>?
 
     /// Último nivel de entrada crudo, escrito desde los callbacks de audio
     /// (alta frecuencia) y publicado a `inputLevel` por `levelTask` a un ritmo
@@ -70,22 +62,6 @@ final class TranscriptionViewModel: ObservableObject {
     /// Freno de la traducción de parciales (el texto final nunca se frena).
     private var lastPartialTranslationAt = Date.distantPast
     private let partialTranslationInterval: TimeInterval = 0.5
-
-    /// Pausa (en segundos) sin texto nuevo tras la cual se cierra el segmento.
-    private let silenceThreshold: TimeInterval = 1.2
-    /// Duración máxima de un segmento antes de forzar el corte (habla continua).
-    private let maxSegmentDuration: TimeInterval = 15
-    /// Edad a partir de la cual se PREFIERE rotar, pero solo aprovechando una
-    /// pausa real (silencio) — ahí el corte es invisible, porque no se está
-    /// diciendo nada en ese instante. Rotar sin esperar el silencio (como
-    /// hacía antes) corta el reconocimiento a mitad de frase: el audio de esa
-    /// ventana queda en buffer y no se pierde, pero no sale texto durante la
-    /// transición, y eso se siente como un freeze aunque no lo sea.
-    private let preferredRotationAge: TimeInterval = 15
-    /// Tope de seguridad: rota sí o sí a esta edad, aunque no haya pausa (caso
-    /// extremo de hablar sin parar nunca). Bastante más alto que el preferido
-    /// para que en la práctica casi siempre se rote durante un silencio.
-    private let maxGenerationDuration: TimeInterval = 45
 
     /// Cola de traducción con coalescencia: cada segmento guarda solo su texto
     /// más reciente. Si el traductor va más lento que los parciales, las
@@ -121,38 +97,40 @@ final class TranscriptionViewModel: ObservableObject {
             return
         }
 
+        let engine = SpeechEngine(locale: Locale(identifier: "en-US"))
+        guard await engine.isLocaleSupported else {
+            status = "El reconocimiento en el dispositivo para inglés no está disponible en este Mac."
+            return
+        }
+
+        // SpeechEngine ya entrega los resultados en la cola principal;
+        // assumeIsolated solo formaliza eso para el compilador.
+        engine.onPartial = { [weak self] text in
+            MainActor.assumeIsolated { self?.handlePartial(text) }
+        }
+        engine.onSegmentFinal = { [weak self] text in
+            MainActor.assumeIsolated { self?.handleSegmentFinal(text) }
+        }
+        engine.onStatus = { [weak self] message in
+            MainActor.assumeIsolated { self?.status = message }
+        }
+
         do {
-            let transcriber = try SpeechTranscriber()
-            if !transcriber.supportsOnDeviceRecognition {
-                status = "El reconocimiento en el dispositivo para inglés no está disponible todavía. Agregá inglés en Ajustes del Sistema → Teclado → Dictado y esperá a que se descargue el modelo."
-                return
-            }
+            try await engine.start()
+        } catch {
+            status = "No se pudo iniciar el reconocedor: \(error.localizedDescription)"
+            return
+        }
+        self.engine = engine
 
-            // SpeechTranscriber ya entrega los resultados en la cola principal;
-            // assumeIsolated solo formaliza eso para el compilador.
-            transcriber.onPartial = { [weak self] generation, fullText in
-                MainActor.assumeIsolated {
-                    self?.handlePartial(generation, fullText)
-                }
-            }
-            transcriber.onTaskEnd = { [weak self] generation, fullText in
-                MainActor.assumeIsolated {
-                    self?.handleTaskEnd(generation, fullText)
-                }
-            }
-            transcriber.onStatus = { [weak self] message in
-                MainActor.assumeIsolated {
-                    self?.status = message
-                }
-            }
-            self.transcriber = transcriber
-
+        do {
             switch sourceKind {
             case .microphone:
                 let granted = await AVCaptureDevice.requestAccess(for: .audio)
                 guard granted else {
                     status = "Permiso de micrófono denegado. Activalo en Ajustes del Sistema → Privacidad y seguridad → Micrófono."
-                    self.transcriber = nil
+                    await engine.stop()
+                    self.engine = nil
                     return
                 }
                 let microphone = MicrophoneSource()
@@ -165,9 +143,9 @@ final class TranscriptionViewModel: ObservableObject {
                             self?.buffersReceived += 1
                         }
                     }
-                    // append() encola en la cola propia del transcriptor y
-                    // vuelve al instante: nunca bloquea el hilo de audio.
-                    transcriber.append(buffer)
+                    // append() convierte el formato y encola; nunca bloquea
+                    // el hilo de audio.
+                    engine.append(buffer)
                 }
                 microphoneSource = microphone
 
@@ -179,7 +157,6 @@ final class TranscriptionViewModel: ObservableObject {
                     }
                 }
                 try await system.start { [weak self] sampleBuffer in
-                    // Nivel primero: el vúmetro no depende del reconocedor.
                     let level = AudioLevelMeter.level(of: sampleBuffer)
                     DispatchQueue.main.async {
                         MainActor.assumeIsolated {
@@ -187,7 +164,7 @@ final class TranscriptionViewModel: ObservableObject {
                             self?.buffersReceived += 1
                         }
                     }
-                    transcriber.append(sampleBuffer)
+                    engine.append(sampleBuffer)
                 }
                 systemSource = system
             }
@@ -195,12 +172,10 @@ final class TranscriptionViewModel: ObservableObject {
             buffersReceived = 0
             resultsReceived = 0
             diagnostics = ""
-            transcriber.start()
             isRunning = true
             status = sourceKind == .microphone
                 ? "Escuchando el micrófono… hablá en inglés."
                 : "Capturando el audio del sistema… reproducí algo en inglés."
-            startSegmentMonitor()
             startLevelMeter()
         } catch {
             status = "No se pudo iniciar: \(error.localizedDescription)"
@@ -213,13 +188,10 @@ final class TranscriptionViewModel: ObservableObject {
         isRunning = false
         cleanUp()
         closeOpenSegment(finalText: nil)
-        resetGenerationTracking()
         status = "Detenido. Podés guardar la transcripción o volver a iniciar."
     }
 
     private func cleanUp() {
-        monitorTask?.cancel()
-        monitorTask = nil
         stopLevelMeter()
         microphoneSource?.stop()
         microphoneSource = nil
@@ -227,8 +199,10 @@ final class TranscriptionViewModel: ObservableObject {
             systemSource = nil
             Task { await system.stop() }
         }
-        transcriber?.stop()
-        transcriber = nil
+        if let engine {
+            self.engine = nil
+            Task { await engine.stop() }
+        }
     }
 
     // MARK: - Vúmetro
@@ -315,37 +289,22 @@ final class TranscriptionViewModel: ObservableObject {
 
     // MARK: - Resultados de reconocimiento
 
-    /// El reconocedor entrega el texto acumulado de la generación entera; el
-    /// segmento abierto muestra solo la parte que todavía no fue consumida
-    /// por segmentos cerrados anteriores.
-    private func handlePartial(_ generation: UUID, _ fullText: String) {
+    /// `SpeechEngine` ya entrega el texto de la frase en curso (no el
+    /// acumulado de la sesión), así que solo hace falta reflejarlo en la fila
+    /// abierta — sin offsets, sin rotación, sin temporizador de silencio.
+    private func handlePartial(_ text: String) {
         resultsReceived += 1
-        guard isRunning, !fullText.isEmpty else { return }
-
-        if generation != currentGeneration {
-            // Cambió la generación (rotación o reinicio tras error): lo que
-            // quedara abierto de la anterior se cierra con su texto actual.
-            closeOpenSegment(finalText: nil)
-            currentGeneration = generation
-            generationStartedAt = Date()
-            consumedCharacters = 0
-            lastFullText = ""
-        }
-
-        lastFullText = fullText
-        let delta = unconsumedText(of: fullText)
-        guard !delta.isEmpty else { return }
+        updateDiagnostics()
+        guard isRunning, !text.isEmpty else { return }
 
         if openSegmentID == nil {
             let id = UUID()
             openSegmentID = id
-            segmentStartedAt = Date()
             segments.append(TranscriptSegment(id: id, english: "", spanish: "", isFinal: false))
         }
 
         guard let id = openSegmentID, let index = index(of: id) else { return }
-        segments[index].english = delta
-        lastPartialAt = Date()
+        segments[index].english = text
 
         // Traducción de los parciales a ritmo moderado: el modelo de Apple
         // corre pesado y bloquea el hilo principal mientras traduce, así que
@@ -354,88 +313,32 @@ final class TranscriptionViewModel: ObservableObject {
         // definitivo se traduce sí o sí al cerrar el segmento.
         if Date().timeIntervalSince(lastPartialTranslationAt) > partialTranslationInterval {
             lastPartialTranslationAt = Date()
-            enqueueTranslation(segmentID: id, text: delta)
+            enqueueTranslation(segmentID: id, text: text)
         }
     }
 
-    /// Fin de una generación (rotación programada o error tipo "no speech").
-    /// La siguiente arranca sola en SpeechTranscriber; acá solo se cierra lo
-    /// que quedaba abierto con el texto final definitivo.
-    private func handleTaskEnd(_ generation: UUID, _ fullText: String) {
-        guard generation == currentGeneration else { return }
-        if !fullText.isEmpty {
-            lastFullText = fullText
-        }
-        closeOpenSegment(finalText: unconsumedText(of: lastFullText))
-        resetGenerationTracking()
+    /// Apple ya decidió que esta frase terminó (por prosodia/pausa real, no
+    /// por un temporizador nuestro). Se cierra la fila con el texto
+    /// definitivo; la frase siguiente arranca sola con el próximo parcial.
+    private func handleSegmentFinal(_ text: String) {
+        resultsReceived += 1
+        updateDiagnostics()
+        closeOpenSegment(finalText: text)
     }
 
-    /// Corta los "subtítulos" vigilando pausas del habla y longitud. El corte
-    /// es local (mover el offset de consumido); el motor de reconocimiento no
-    /// se toca, salvo la rotación de higiene cuando la generación ya es vieja
-    /// — y siempre aprovechando un silencio, cuando no se pierde nada.
-    private func startSegmentMonitor() {
-        monitorTask = Task { [weak self] in
-            while !Task.isCancelled {
-                try? await Task.sleep(for: .milliseconds(400))
-                self?.checkSegmentBoundary()
-            }
-        }
-    }
-
-    private func checkSegmentBoundary() {
-        guard isRunning else { return }
-
-        // Actualiza los contadores visibles (el monitor ya corre cada 400 ms,
-        // así que esto no agrega presión sobre SwiftUI).
+    private func updateDiagnostics() {
         let summary = "audio \(buffersReceived) · resultados \(resultsReceived)"
         if summary != diagnostics {
             diagnostics = summary
         }
-        let silence = lastPartialAt.map { Date().timeIntervalSince($0) } ?? 0
-        let segmentAge = segmentStartedAt.map { Date().timeIntervalSince($0) } ?? 0
-        let generationAge = generationStartedAt.map { Date().timeIntervalSince($0) } ?? 0
-
-        // Tope de seguridad: rota sí o sí, aunque no haya pausa. Solo pasa en
-        // el caso extremo de hablar sin parar más tiempo que
-        // `maxGenerationDuration`.
-        if generationStartedAt != nil, generationAge > maxGenerationDuration {
-            cutSegmentLocally()
-            generationStartedAt = nil
-            transcriber?.rotate()
-            return
-        }
-
-        guard openSegmentID != nil else { return }
-        if silence > silenceThreshold {
-            cutSegmentLocally()
-            // La rotación "de rutina" solo ocurre acá, aprovechando esta
-            // pausa real: el corte es invisible porque no se está hablando.
-            if generationAge > preferredRotationAge {
-                generationStartedAt = nil
-                transcriber?.rotate()
-            }
-        } else if segmentAge > maxSegmentDuration {
-            cutSegmentLocally()
-        }
     }
 
-    /// Cierra el segmento abierto y marca todo el texto actual como consumido,
-    /// de modo que el próximo parcial empiece un segmento nuevo con el delta.
-    private func cutSegmentLocally() {
-        let consumedNow = lastFullText.count
-        closeOpenSegment(finalText: nil)
-        consumedCharacters = consumedNow
-    }
-
-    /// Cierra el segmento abierto. `finalText` permite reemplazar su texto por
-    /// una versión definitiva (fin de generación); con `nil` se queda el que
-    /// ya mostraba.
+    /// Cierra el segmento abierto. `finalText` reemplaza su texto por la
+    /// versión definitiva; con `nil` (al detener manualmente) se queda con el
+    /// último parcial mostrado.
     private func closeOpenSegment(finalText: String?) {
         guard let id = openSegmentID else { return }
         openSegmentID = nil
-        segmentStartedAt = nil
-        lastPartialAt = nil
 
         guard let index = index(of: id) else { return }
         var text = segments[index].english
@@ -449,22 +352,6 @@ final class TranscriptionViewModel: ObservableObject {
         segments[index].english = text
         segments[index].isFinal = true
         enqueueTranslation(segmentID: id, text: text)
-    }
-
-    /// Parte del texto acumulado que aún no pertenece a ningún segmento
-    /// cerrado. Si el reconocedor revisó el texto y quedó más corto que lo
-    /// consumido, devuelve vacío hasta que vuelva a crecer.
-    private func unconsumedText(of fullText: String) -> String {
-        guard fullText.count > consumedCharacters else { return "" }
-        return String(fullText.dropFirst(consumedCharacters))
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-    }
-
-    private func resetGenerationTracking() {
-        currentGeneration = nil
-        generationStartedAt = nil
-        consumedCharacters = 0
-        lastFullText = ""
     }
 
     // MARK: - Traducción

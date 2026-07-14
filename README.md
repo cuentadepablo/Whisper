@@ -11,18 +11,21 @@ Todo el procesamiento es **100 % local**: no se envía nada a internet.
 |---|---|---|
 | Captura de micrófono | `AVAudioEngine` | Buffers PCM de lo que hablás |
 | Captura del audio del sistema | `ScreenCaptureKit` (`SCStream` con `capturesAudio`) | Lo que suena en el Mac (videos, llamadas, etc.), sin BlackHole ni drivers |
-| Transcripción (EN) | `Speech` / `SFSpeechRecognizer` con `requiresOnDeviceRecognition = true` | Reconocimiento continuo, en el dispositivo |
+| Transcripción (EN) | `Speech` / `SpeechAnalyzer` + `SpeechTranscriber` (macOS 26+) | Reconocimiento continuo, en el dispositivo |
 | Traducción (EN→ES) | `Translation` / `TranslationSession` | Traducción local con los modelos de Apple |
 
-El motor de reconocimiento corre de forma continua, sin detenerse nunca: los
-"subtítulos" se cortan localmente, partiendo el texto que crece cuando se
-detecta una pausa en el habla (~1,2 s sin palabras nuevas) o cuando el
-segmento supera los ~15 s de habla continua. Cortar un segmento no reinicia
-el reconocedor (reiniciarlo en cada pausa producía huecos y bloqueos); la
-tarea de reconocimiento se rota cada ~15 s, pero **solo aprovechando una
-pausa real** —el corte es invisible porque no se está diciendo nada en ese
-instante—, con un tope de seguridad a los 45 s por si se habla sin parar. El
-audio de la transición se guarda en buffer para no perder nada.
+La transcripción corre sobre **`SpeechAnalyzer`/`SpeechTranscriber`**, el
+framework que Apple presentó en WWDC 2025 como reemplazo de
+`SFSpeechRecognizer` para reconocimiento continuo. La diferencia de fondo:
+con `SFSpeechRecognizer` había que mantener una tarea de reconocimiento viva
+y rotarla manualmente (cerrarla, esperar su resultado final, abrir una
+nueva), y esa transición —aunque se hiciera con cuidado— podía cortar el
+reconocimiento a mitad de frase o directamente trabarlo. `SpeechAnalyzer`
+mantiene **una única sesión continua** durante toda la captura: no hay nada
+que rotar. `transcriber.results` entrega el texto de a una frase por vez (no
+el acumulado de la sesión), con `isFinal` marcando cuándo Apple —por pausas
+reales del habla, no por un temporizador nuestro— da esa frase por
+terminada. Los "subtítulos" de la UI son, literalmente, esas frases.
 
 Mientras hablás, el parcial se muestra en cursiva y se traduce en vivo a
 ritmo moderado (~2 por segundo): el modelo de traducción de Apple corre
@@ -35,12 +38,12 @@ trabada.
 
 ## Requisitos
 
-- **macOS 15 (Sequoia) o posterior.** Aunque el framework Translation existe
-  desde macOS 14.4, en esa versión solo ofrece la hoja de traducción con
-  interfaz propia; la API programática (`TranslationSession`), que es la que
-  permite traducir texto dentro de la app en tiempo real, requiere macOS 15.
-- **Xcode 16 o posterior** (el proyecto usa el formato de carpetas
-  sincronizadas de Xcode 16).
+- **macOS 26 (Tahoe) o posterior.** Es un requisito duro: `SpeechAnalyzer` y
+  `SpeechTranscriber` (el motor de transcripción) son API nuevas de macOS 26.
+  Si tu Mac no puede actualizar a macOS 26, esta versión de la app no va a
+  compilar; hay que volver a una versión anterior basada en
+  `SFSpeechRecognizer` (macOS 15+).
+- **Xcode 26 o posterior** (el que trae el SDK de macOS 26).
 - Mac con Apple Silicon recomendado (los modelos on-device rinden mejor).
 
 ## Abrir, compilar y ejecutar
@@ -108,9 +111,9 @@ Notas:
   mínimo posible y se descarta.)
 - En macOS 15, el sistema puede volver a pedir confirmación de la grabación
   de pantalla periódicamente; es comportamiento normal de Sequoia.
-- Si la transcripción no arranca, verificá que el dictado en inglés esté
-  disponible: **Ajustes del Sistema → Teclado → Dictado**, agregá *English
-  (US)* y esperá a que termine la descarga del modelo.
+- La primera vez, `SpeechEngine` descarga el modelo de voz en inglés
+  automáticamente vía `AssetInventory` (se ve un mensaje en la barra de
+  estado); no hace falta ir a Ajustes → Dictado como con la versión anterior.
 - Los idiomas de traducción (inglés y español) se descargan una sola vez; la
   app lo ofrece al iniciarse. También se gestionan en **Ajustes del Sistema →
   Idioma y región → Idiomas de traducción**.
@@ -122,8 +125,8 @@ Whisper.xcodeproj/          Proyecto Xcode (formato Xcode 16)
 Whisper/
   WhisperApp.swift          Punto de entrada SwiftUI
   ContentView.swift         UI: controles + dos columnas con auto-scroll
-  TranscriptionViewModel.swift  Orquestación: segmentos, pausas, traducción, guardado
-  SpeechTranscriber.swift   SFSpeechRecognizer en modo streaming, on-device
+  TranscriptionViewModel.swift  Orquestación: segmentos, traducción, guardado
+  SpeechEngine.swift        SpeechAnalyzer/SpeechTranscriber (macOS 26), conversión de formato de audio
   AudioSources.swift        MicrophoneSource (AVAudioEngine) y SystemAudioSource (ScreenCaptureKit)
   Whisper.entitlements      Sandbox + micrófono + guardado de archivos
 ```
@@ -141,4 +144,8 @@ sistema no usa clave de Info.plist: se autoriza vía TCC (Ajustes del Sistema).
   traducción buena llega cuando el segmento se cierra.
 - Solo se captura audio de un idioma por sesión (inglés → castellano). Es
   fácil de extender: los idiomas están centralizados en
-  `ContentView.translationConfiguration` y en el locale de `SpeechTranscriber`.
+  `ContentView.translationConfiguration` y en el locale de `SpeechEngine`.
+- `SpeechAnalyzer`/`SpeechTranscriber` es una API nueva de macOS 26; algunos
+  detalles de su comportamiento en producción (por ejemplo, con audio del
+  sistema de mala calidad) todavía no están tan probados en la comunidad
+  como los de `SFSpeechRecognizer`.
