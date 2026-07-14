@@ -29,6 +29,10 @@ final class TranscriptionViewModel: ObservableObject {
     /// en el modo de prueba de micrófono.
     @Published var inputLevel: Float = 0
     @Published var isMicTesting = false
+    /// Traducción simultánea al castellano. Si se desactiva, la app solo
+    /// transcribe (columna española vacía) y no usa el framework Translation,
+    /// que es lo que carga el hilo principal.
+    @Published var translationEnabled = true
 
     private var microphoneSource: MicrophoneSource?
     private var systemSource: SystemAudioSource?
@@ -445,6 +449,9 @@ final class TranscriptionViewModel: ObservableObject {
     }
 
     private func enqueueTranslation(segmentID: UUID, text: String) {
+        // Modo "solo transcribir": no se encola nada y el framework Translation
+        // no se toca.
+        guard translationEnabled else { return }
         // Si el segmento ya estaba en cola, solo se reemplaza su texto por el
         // más nuevo; no se duplica la entrada.
         if pendingTranslations.updateValue(text, forKey: segmentID) == nil {
@@ -470,7 +477,9 @@ final class TranscriptionViewModel: ObservableObject {
         for (index, segment) in segments.enumerated() {
             lines.append("[\(index + 1)]")
             lines.append("EN: \(segment.english)")
-            lines.append("ES: \(segment.spanish)")
+            if !segment.spanish.isEmpty {
+                lines.append("ES: \(segment.spanish)")
+            }
             lines.append("")
         }
 

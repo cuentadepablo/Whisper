@@ -54,6 +54,12 @@ struct ContentView: View {
             }
             .disabled(viewModel.isRunning)
 
+            Toggle(isOn: $viewModel.translationEnabled) {
+                Text("Traducir")
+            }
+            .toggleStyle(.switch)
+            .help("Desactivalo para solo transcribir (sin traducción). Evita la carga del traductor en el hilo principal.")
+
             Spacer()
 
             Button {
@@ -83,8 +89,10 @@ struct ContentView: View {
         HStack(spacing: 12) {
             Text("English — transcripción")
                 .frame(maxWidth: .infinity, alignment: .leading)
-            Text("Español — traducción")
-                .frame(maxWidth: .infinity, alignment: .leading)
+            if viewModel.translationEnabled {
+                Text("Español — traducción")
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
         }
         .font(.headline)
         .foregroundStyle(.secondary)
@@ -143,10 +151,12 @@ struct ContentView: View {
                 .foregroundStyle(segment.isFinal ? Color.primary : Color.secondary)
                 .frame(maxWidth: .infinity, alignment: .leading)
 
-            Text(segment.spanish.isEmpty ? "…" : segment.spanish)
-                .italic(!segment.isFinal)
-                .foregroundStyle(segment.isFinal ? Color.primary : Color.secondary)
-                .frame(maxWidth: .infinity, alignment: .leading)
+            if viewModel.translationEnabled {
+                Text(segment.spanish.isEmpty ? "…" : segment.spanish)
+                    .italic(!segment.isFinal)
+                    .foregroundStyle(segment.isFinal ? Color.primary : Color.secondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
         }
         .font(.system(size: 15))
         .textSelection(.enabled)

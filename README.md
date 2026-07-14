@@ -63,6 +63,11 @@ trabada.
   El mismo vúmetro se muestra también durante la captura normal (micrófono
   o audio del sistema), así siempre se ve si está entrando audio.
 - Elegí la fuente en el selector: **Micrófono** o **Audio del sistema**.
+- **Traducir** (interruptor): activado muestra las dos columnas (inglés y
+  castellano) con traducción en vivo. Desactivado, la app **solo transcribe**
+  —una sola columna, sin usar el framework Translation— lo que elimina la
+  carga del traductor sobre el hilo principal. Podés cambiarlo en cualquier
+  momento, incluso mientras corre.
 - Presioná **Iniciar** (o ⌘Espacio). Hablá en inglés o reproducí un video
   en inglés.
 - **Detener** cierra la sesión; **Guardar…** exporta un `.txt` con ambos
