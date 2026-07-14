@@ -56,6 +56,10 @@ final class TranscriptionViewModel: ObservableObject {
     private var latestRawLevel: Float = 0
     private var levelTask: Task<Void, Never>?
 
+    /// Freno de la traducción de parciales (el texto final nunca se frena).
+    private var lastPartialTranslationAt = Date.distantPast
+    private let partialTranslationInterval: TimeInterval = 0.5
+
     /// Pausa (en segundos) sin texto nuevo tras la cual se cierra el segmento.
     private let silenceThreshold: TimeInterval = 1.2
     /// Duración máxima de un segmento antes de forzar el corte (habla continua).
@@ -305,10 +309,15 @@ final class TranscriptionViewModel: ObservableObject {
         segments[index].english = delta
         lastPartialAt = Date()
 
-        // Traducción "en vivo": cada parcial se manda al traductor de
-        // inmediato; la coalescencia de la cola descarta las versiones que
-        // queden obsoletas antes de ser procesadas.
-        enqueueTranslation(segmentID: id, text: delta)
+        // Traducción de los parciales a ritmo moderado: el modelo de Apple
+        // corre pesado y bloquea el hilo principal mientras traduce, así que
+        // traducir cada parcial (varios por segundo) lo satura. Se limita a
+        // ~2/seg para dar sensación en vivo sin ahogar el hilo; el texto
+        // definitivo se traduce sí o sí al cerrar el segmento.
+        if Date().timeIntervalSince(lastPartialTranslationAt) > partialTranslationInterval {
+            lastPartialTranslationAt = Date()
+            enqueueTranslation(segmentID: id, text: delta)
+        }
     }
 
     /// Fin de una generación (rotación programada o error tipo "no speech").
@@ -427,6 +436,10 @@ final class TranscriptionViewModel: ObservableObject {
                 } catch {
                     status = "Error de traducción: \(error.localizedDescription)"
                 }
+                // Cede el hilo principal entre traducciones para que el texto,
+                // el vúmetro y el scroll puedan refrescarse y la UI no se sienta
+                // congelada si hay varias traducciones encoladas.
+                await Task.yield()
             }
         }
     }

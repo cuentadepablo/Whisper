@@ -22,11 +22,14 @@ el reconocedor (reiniciarlo en cada pausa producía huecos y bloqueos); solo
 se rota la tarea de reconocimiento cada ~50 s como higiene, siempre
 aprovechando un silencio y guardando en buffer el audio de la transición.
 
-Mientras hablás, el parcial se muestra en cursiva y se traduce en vivo: cada
-actualización se manda al traductor de inmediato, y una cola con coalescencia
-descarta las versiones que quedaron viejas para que la traducción nunca se
-atrase respecto del habla. Al cerrarse el segmento se traduce la frase
-completa definitiva.
+Mientras hablás, el parcial se muestra en cursiva y se traduce en vivo a
+ritmo moderado (~2 por segundo): el modelo de traducción de Apple corre
+pesado y bloquea el hilo principal mientras trabaja, así que traducir cada
+parcial lo saturaría y congelaría la interfaz. El texto definitivo, en
+cambio, se traduce sí o sí al cerrarse el segmento. Una cola con coalescencia
+descarta las versiones que quedaron viejas para que la traducción no se
+atrase, y cede el hilo entre traducciones para que la UI no se sienta
+trabada.
 
 ## Requisitos
 
