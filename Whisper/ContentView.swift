@@ -11,6 +11,9 @@ struct ContentView: View {
         target: Locale.Language(identifier: "es-ES")
     )
 
+    /// Coalesce ráfagas de parciales (varios por frame) en un solo scroll.
+    @State private var scrollTask: Task<Void, Never>?
+
     var body: some View {
         VStack(spacing: 0) {
             controls
@@ -103,10 +106,14 @@ struct ContentView: View {
                 }
             }
             .onChange(of: viewModel.segments) {
-                // Diferido al próximo ciclo del run loop: hacer scroll de forma
-                // síncrona dentro de onChange publica cambios en pleno view
-                // update ("Publishing changes from within view updates").
-                DispatchQueue.main.async {
+                // Los parciales pueden mutar el array varias veces por frame;
+                // se cancela cualquier scroll pendiente y se reprograma, así
+                // una ráfaga termina en un solo scrollTo en vez de disparar
+                // "tried to update multiple times per frame".
+                scrollTask?.cancel()
+                scrollTask = Task { @MainActor in
+                    try? await Task.sleep(for: .milliseconds(50))
+                    guard !Task.isCancelled else { return }
                     withAnimation(.easeOut(duration: 0.15)) {
                         proxy.scrollTo("bottom", anchor: .bottom)
                     }
