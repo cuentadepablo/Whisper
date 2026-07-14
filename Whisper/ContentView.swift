@@ -4,11 +4,11 @@ import Translation
 struct ContentView: View {
     @StateObject private var viewModel = TranscriptionViewModel()
 
-    /// Inglés → Español. Al estar fija, la sesión de traducción se crea una
-    /// sola vez y vive mientras la ventana exista.
+    /// Inglés → Español (España). Al estar fija, la sesión de traducción se
+    /// crea una sola vez y vive mientras la ventana exista.
     @State private var translationConfiguration = TranslationSession.Configuration(
         source: Locale.Language(identifier: "en"),
-        target: Locale.Language(identifier: "es")
+        target: Locale.Language(identifier: "es-ES")
     )
 
     var body: some View {
@@ -103,8 +103,13 @@ struct ContentView: View {
                 }
             }
             .onChange(of: viewModel.segments) {
-                withAnimation(.easeOut(duration: 0.15)) {
-                    proxy.scrollTo("bottom", anchor: .bottom)
+                // Diferido al próximo ciclo del run loop: hacer scroll de forma
+                // síncrona dentro de onChange publica cambios en pleno view
+                // update ("Publishing changes from within view updates").
+                DispatchQueue.main.async {
+                    withAnimation(.easeOut(duration: 0.15)) {
+                        proxy.scrollTo("bottom", anchor: .bottom)
+                    }
                 }
             }
         }
