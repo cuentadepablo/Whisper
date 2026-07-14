@@ -4,18 +4,15 @@ import Speech
 /// Transcripción continua de inglés hablado, 100 % en el dispositivo
 /// (`requiresOnDeviceRecognition = true`, sin llamadas a internet).
 ///
-/// El reconocimiento on-device no emite resultados finales por sí solo, así
-/// que el segmento en curso se cierra desde afuera (ver `finishCurrentSegment`)
-/// cuando el view model detecta una pausa en el habla. Cerrar una petición y
-/// obtener su resultado final es asíncrono y puede tardar un par de segundos.
+/// Diseño: una sola tarea de reconocimiento de larga duración ("generación")
+/// que entrega el texto acumulado en cada parcial. El corte en segmentos tipo
+/// subtítulo NO ocurre acá: lo hace el view model partiendo ese texto
+/// creciente, sin detener nunca el motor — reiniciar el reconocimiento en
+/// cada pausa era lo que producía huecos y bloqueos.
 ///
-/// Importante: nunca hay dos `SFSpeechRecognitionTask` activas al mismo
-/// tiempo sobre el mismo `recognizer` —correr dos en simultáneo no es un
-/// patrón soportado de forma fiable para reconocimiento on-device y en la
-/// práctica puede dejar de producir resultados por completo—. Por eso, en
-/// vez de abrir la petición siguiente mientras la vieja todavía termina, el
-/// audio que llega en ese hueco se guarda en un buffer y se vuelca en la
-/// petición nueva recién cuando la vieja ya devolvió su resultado final.
+/// La tarea solo se rota de vez en cuando (ver `rotate`), y nunca hay dos
+/// tareas activas a la vez: el audio que llega mientras la vieja termina se
+/// guarda en un buffer y se vuelca en la nueva al crearse.
 final class SpeechTranscriber {
     private let recognizer: SFSpeechRecognizer
     private var request: SFSpeechAudioBufferRecognitionRequest?
@@ -25,11 +22,11 @@ final class SpeechTranscriber {
     private var bufferedPCM: [AVAudioPCMBuffer] = []
     private var bufferedSamples: [CMSampleBuffer] = []
 
-    /// Texto parcial de una generación (hilo principal). Solo se llama para
-    /// la generación actualmente activa.
+    /// Texto acumulado (parcial) de la generación activa (hilo principal).
     var onPartial: ((UUID, String) -> Void)?
-    /// Texto final de una generación (hilo principal).
-    var onSegmentEnd: ((UUID, String) -> Void)?
+    /// Texto final de una generación que terminó (hilo principal). Tras esto
+    /// arranca sola la generación siguiente si seguimos corriendo.
+    var onTaskEnd: ((UUID, String) -> Void)?
 
     init() throws {
         guard let recognizer = SFSpeechRecognizer(locale: Locale(identifier: "en-US")) else {
@@ -56,11 +53,11 @@ final class SpeechTranscriber {
         bufferedSamples.removeAll()
     }
 
-    /// Cierra la generación en curso. El audio que siga llegando mientras el
-    /// resultado final está en camino se guarda en un buffer y se vuelca en
-    /// la petición nueva apenas exista, sin llegar a correr dos peticiones al
-    /// mismo tiempo.
-    func finishCurrentSegment() {
+    /// Cierra la generación actual para abrir una nueva (higiene periódica:
+    /// evita que una única tarea acumule minutos de audio). Llamar solo
+    /// durante un silencio; el audio que llegue en la transición se guarda en
+    /// buffer, así que no se pierde nada.
+    func rotate() {
         guard isRunning, request != nil else { return }
         request?.endAudio()
         request = nil
@@ -93,8 +90,7 @@ final class SpeechTranscriber {
         newRequest.taskHint = .dictation
         request = newRequest
 
-        // Vuelca lo que se haya acumulado mientras la petición anterior
-        // terminaba, para no perder el audio capturado en ese hueco.
+        // Vuelca lo acumulado mientras la generación anterior terminaba.
         for buffer in bufferedPCM { newRequest.append(buffer) }
         bufferedPCM.removeAll()
         for sample in bufferedSamples { newRequest.appendAudioSampleBuffer(sample) }
@@ -108,7 +104,7 @@ final class SpeechTranscriber {
                 if let result {
                     lastText = result.bestTranscription.formattedString
                     if result.isFinal {
-                        self.onSegmentEnd?(generation, lastText)
+                        self.onTaskEnd?(generation, lastText)
                         self.startNextIfNeeded(after: generation)
                         return
                     }
@@ -119,17 +115,16 @@ final class SpeechTranscriber {
                 }
 
                 if error != nil {
-                    // Errores como "no speech detected" cierran la generación
-                    // con lo que hubiera.
-                    self.onSegmentEnd?(generation, lastText)
+                    // Errores como "no speech detected" terminan la
+                    // generación con lo que hubiera; se reabre sola.
+                    self.onTaskEnd?(generation, lastText)
                     self.startNextIfNeeded(after: generation)
                 }
             }
         }
     }
 
-    /// Si nadie abrió ya una petición nueva (por ejemplo, `stop()` no se
-    /// llamó mientras esta generación terminaba), arranca la siguiente.
+    /// Arranca la generación siguiente si nadie lo hizo ya y seguimos activos.
     private func startNextIfNeeded(after generation: UUID) {
         guard isRunning, request == nil, currentGeneration == generation else { return }
         beginRequest()

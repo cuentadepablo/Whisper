@@ -14,13 +14,19 @@ Todo el procesamiento es **100 % local**: no se envía nada a internet.
 | Transcripción (EN) | `Speech` / `SFSpeechRecognizer` con `requiresOnDeviceRecognition = true` | Reconocimiento continuo, en el dispositivo |
 | Traducción (EN→ES) | `Translation` / `TranslationSession` | Traducción local con los modelos de Apple |
 
-La app corta el texto en segmentos cuando detecta una pausa en el habla
-(~1,2 s sin palabras nuevas): en ese momento el segmento se marca como final,
-se traduce y empieza uno nuevo. Mientras hablás, el parcial se muestra en
-cursiva y se traduce en vivo: cada actualización se manda al traductor de
-inmediato, y una cola con coalescencia descarta las versiones que quedaron
-viejas para que la traducción nunca se atrase respecto del habla. Al cerrarse
-el segmento se traduce la frase completa definitiva.
+El motor de reconocimiento corre de forma continua, sin detenerse nunca: los
+"subtítulos" se cortan localmente, partiendo el texto que crece cuando se
+detecta una pausa en el habla (~1,2 s sin palabras nuevas) o cuando el
+segmento supera los ~20 s de habla continua. Cortar un segmento no reinicia
+el reconocedor (reiniciarlo en cada pausa producía huecos y bloqueos); solo
+se rota la tarea de reconocimiento cada ~50 s como higiene, siempre
+aprovechando un silencio y guardando en buffer el audio de la transición.
+
+Mientras hablás, el parcial se muestra en cursiva y se traduce en vivo: cada
+actualización se manda al traductor de inmediato, y una cola con coalescencia
+descarta las versiones que quedaron viejas para que la traducción nunca se
+atrase respecto del habla. Al cerrarse el segmento se traduce la frase
+completa definitiva.
 
 ## Requisitos
 
@@ -58,6 +64,20 @@ el segmento se traduce la frase completa definitiva.
   en inglés.
 - **Detener** cierra la sesión; **Guardar…** exporta un `.txt` con ambos
   idiomas, numerado por segmento.
+
+### Usarla sin Xcode (app independiente)
+
+Para tener `Whisper.app` como una app normal, sin la consola de Xcode:
+
+1. En Xcode: **Product → Archive**.
+2. En la ventana del organizador: **Distribute App → Custom → Copy App** y
+   elegí una carpeta.
+3. Arrastrá `Whisper.app` a `/Applications` y abrila desde ahí.
+
+Notas: los permisos de Privacidad y seguridad se piden/aplican igual (si ya
+los diste, se conservan, porque es el mismo bundle id). Correr fuera de Xcode
+elimina el ruido de consola y la sobrecarga del debugger, pero el
+comportamiento del reconocimiento es el mismo binario.
 
 ## Permisos
 

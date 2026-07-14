@@ -35,16 +35,27 @@ final class TranscriptionViewModel: ObservableObject {
     private var micTestSource: MicrophoneSource?
     private var transcriber: SpeechTranscriber?
 
-    /// Generación (id de petición de reconocimiento) actualmente activa.
-    private var currentSegmentID: UUID?
+    /// Estado de la segmentación local. El reconocedor entrega un único texto
+    /// creciente por generación; los segmentos tipo subtítulo se cortan acá,
+    /// llevando la cuenta de cuántos caracteres ya fueron "consumidos" por
+    /// segmentos cerrados. Cortar un segmento no toca el motor de
+    /// reconocimiento: solo mueve ese offset.
+    private var currentGeneration: UUID?
+    private var generationStartedAt: Date?
+    private var consumedCharacters = 0
+    private var lastFullText = ""
+    private var openSegmentID: UUID?
     private var lastPartialAt: Date?
     private var segmentStartedAt: Date?
     private var monitorTask: Task<Void, Never>?
 
     /// Pausa (en segundos) sin texto nuevo tras la cual se cierra el segmento.
     private let silenceThreshold: TimeInterval = 1.2
-    /// Duración máxima de un segmento antes de forzar el cierre.
-    private let maxSegmentDuration: TimeInterval = 45
+    /// Duración máxima de un segmento antes de forzar el corte (habla continua).
+    private let maxSegmentDuration: TimeInterval = 20
+    /// Edad a partir de la cual, aprovechando un silencio, se rota la tarea de
+    /// reconocimiento para que no acumule minutos de audio.
+    private let maxGenerationDuration: TimeInterval = 50
 
     /// Cola de traducción con coalescencia: cada segmento guarda solo su texto
     /// más reciente. Si el traductor va más lento que los parciales, las
@@ -89,14 +100,14 @@ final class TranscriptionViewModel: ObservableObject {
 
             // SpeechTranscriber ya entrega los resultados en la cola principal;
             // assumeIsolated solo formaliza eso para el compilador.
-            transcriber.onPartial = { [weak self] id, text in
+            transcriber.onPartial = { [weak self] generation, fullText in
                 MainActor.assumeIsolated {
-                    self?.handlePartial(id, text)
+                    self?.handlePartial(generation, fullText)
                 }
             }
-            transcriber.onSegmentEnd = { [weak self] id, text in
+            transcriber.onTaskEnd = { [weak self] generation, fullText in
                 MainActor.assumeIsolated {
-                    self?.handleSegmentEnd(id, text)
+                    self?.handleTaskEnd(generation, fullText)
                 }
             }
             self.transcriber = transcriber
@@ -152,18 +163,8 @@ final class TranscriptionViewModel: ObservableObject {
         guard isRunning else { return }
         isRunning = false
         cleanUp()
-
-        // Cerrar el segmento parcial que quedara abierto.
-        if let id = currentSegmentID, let index = index(of: id) {
-            if segments[index].english.isEmpty {
-                segments.remove(at: index)
-            } else {
-                segments[index].isFinal = true
-                enqueueTranslation(segmentID: id, text: segments[index].english)
-            }
-        }
-        currentSegmentID = nil
-        lastPartialAt = nil
+        closeOpenSegment(finalText: nil)
+        resetGenerationTracking()
         status = "Detenido. Podés guardar la transcripción o volver a iniciar."
     }
 
@@ -240,54 +241,59 @@ final class TranscriptionViewModel: ObservableObject {
 
     // MARK: - Resultados de reconocimiento
 
-    /// Un `id` nuevo (nunca visto) crea su fila y pasa a ser el segmento
-    /// activo. Los parciales de una generación que ya quedó atrás nunca
-    /// llegan acá: `SpeechTranscriber` los filtra antes de notificar.
-    private func handlePartial(_ id: UUID, _ text: String) {
-        guard isRunning, !text.isEmpty else { return }
+    /// El reconocedor entrega el texto acumulado de la generación entera; el
+    /// segmento abierto muestra solo la parte que todavía no fue consumida
+    /// por segmentos cerrados anteriores.
+    private func handlePartial(_ generation: UUID, _ fullText: String) {
+        guard isRunning, !fullText.isEmpty else { return }
 
-        if index(of: id) == nil {
+        if generation != currentGeneration {
+            // Cambió la generación (rotación o reinicio tras error): lo que
+            // quedara abierto de la anterior se cierra con su texto actual.
+            closeOpenSegment(finalText: nil)
+            currentGeneration = generation
+            generationStartedAt = Date()
+            consumedCharacters = 0
+            lastFullText = ""
+        }
+
+        lastFullText = fullText
+        let delta = unconsumedText(of: fullText)
+        guard !delta.isEmpty else { return }
+
+        if openSegmentID == nil {
+            let id = UUID()
+            openSegmentID = id
+            segmentStartedAt = Date()
             segments.append(TranscriptSegment(id: id, english: "", spanish: "", isFinal: false))
         }
-        if currentSegmentID != id {
-            currentSegmentID = id
-            segmentStartedAt = Date()
-        }
 
-        guard let index = index(of: id) else { return }
-        segments[index].english = text
+        guard let id = openSegmentID, let index = index(of: id) else { return }
+        segments[index].english = delta
         lastPartialAt = Date()
 
         // Traducción "en vivo": cada parcial se manda al traductor de
-        // inmediato; la coalescencia de la cola se encarga de descartar las
-        // versiones que queden obsoletas antes de ser procesadas.
-        enqueueTranslation(segmentID: id, text: text)
+        // inmediato; la coalescencia de la cola descarta las versiones que
+        // queden obsoletas antes de ser procesadas.
+        enqueueTranslation(segmentID: id, text: delta)
     }
 
-    /// Llega para cualquier generación —viva o ya retirada— así que se
-    /// localiza y cierra por `id`, sin asumir que es la generación activa.
-    private func handleSegmentEnd(_ id: UUID, _ text: String) {
-        if currentSegmentID == id {
-            currentSegmentID = nil
-            segmentStartedAt = nil
-            lastPartialAt = nil
+    /// Fin de una generación (rotación programada o error tipo "no speech").
+    /// La siguiente arranca sola en SpeechTranscriber; acá solo se cierra lo
+    /// que quedaba abierto con el texto final definitivo.
+    private func handleTaskEnd(_ generation: UUID, _ fullText: String) {
+        guard generation == currentGeneration else { return }
+        if !fullText.isEmpty {
+            lastFullText = fullText
         }
-
-        guard let index = index(of: id) else { return }
-        let finalText = text.isEmpty ? segments[index].english : text
-        if finalText.isEmpty {
-            segments.remove(at: index)
-            return
-        }
-        segments[index].english = finalText
-        segments[index].isFinal = true
-        enqueueTranslation(segmentID: id, text: finalText)
+        closeOpenSegment(finalText: unconsumedText(of: lastFullText))
+        resetGenerationTracking()
     }
 
-    /// Vigila las pausas del habla: si no llegó texto nuevo por un rato (o el
-    /// segmento se hizo demasiado largo), rota a una petición nueva. Así se
-    /// forman los "subtítulos", sin que el audio deje de tener destino en
-    /// ningún momento (ver comentario en `SpeechTranscriber.finishCurrentSegment`).
+    /// Corta los "subtítulos" vigilando pausas del habla y longitud. El corte
+    /// es local (mover el offset de consumido); el motor de reconocimiento no
+    /// se toca, salvo la rotación de higiene cuando la generación ya es vieja
+    /// — y siempre aprovechando un silencio, cuando no se pierde nada.
     private func startSegmentMonitor() {
         monitorTask = Task { [weak self] in
             while !Task.isCancelled {
@@ -298,17 +304,66 @@ final class TranscriptionViewModel: ObservableObject {
     }
 
     private func checkSegmentBoundary() {
-        guard isRunning, currentSegmentID != nil else { return }
+        guard isRunning, openSegmentID != nil else { return }
         let silence = lastPartialAt.map { Date().timeIntervalSince($0) } ?? 0
-        let duration = segmentStartedAt.map { Date().timeIntervalSince($0) } ?? 0
-        if silence > silenceThreshold || duration > maxSegmentDuration {
-            // Se desprende del segmento actual ya mismo: su resultado final
-            // llegará más tarde por handleSegmentEnd, identificado por su id.
-            currentSegmentID = nil
-            segmentStartedAt = nil
-            lastPartialAt = nil
-            transcriber?.finishCurrentSegment()
+        let segmentAge = segmentStartedAt.map { Date().timeIntervalSince($0) } ?? 0
+        let generationAge = generationStartedAt.map { Date().timeIntervalSince($0) } ?? 0
+
+        if silence > silenceThreshold {
+            cutSegmentLocally()
+            if generationAge > maxGenerationDuration {
+                transcriber?.rotate()
+            }
+        } else if segmentAge > maxSegmentDuration {
+            cutSegmentLocally()
         }
+    }
+
+    /// Cierra el segmento abierto y marca todo el texto actual como consumido,
+    /// de modo que el próximo parcial empiece un segmento nuevo con el delta.
+    private func cutSegmentLocally() {
+        let consumedNow = lastFullText.count
+        closeOpenSegment(finalText: nil)
+        consumedCharacters = consumedNow
+    }
+
+    /// Cierra el segmento abierto. `finalText` permite reemplazar su texto por
+    /// una versión definitiva (fin de generación); con `nil` se queda el que
+    /// ya mostraba.
+    private func closeOpenSegment(finalText: String?) {
+        guard let id = openSegmentID else { return }
+        openSegmentID = nil
+        segmentStartedAt = nil
+        lastPartialAt = nil
+
+        guard let index = index(of: id) else { return }
+        var text = segments[index].english
+        if let finalText, !finalText.isEmpty {
+            text = finalText
+        }
+        if text.isEmpty {
+            segments.remove(at: index)
+            return
+        }
+        segments[index].english = text
+        segments[index].isFinal = true
+        enqueueTranslation(segmentID: id, text: text)
+    }
+
+    /// Parte del texto acumulado que aún no pertenece a ningún segmento
+    /// cerrado. Si el reconocedor revisó el texto y quedó más corto que lo
+    /// consumido, devuelve vacío hasta que vuelva a crecer.
+    private func unconsumedText(of fullText: String) -> String {
+        guard fullText.count > consumedCharacters else { return "" }
+        return String(fullText.dropFirst(consumedCharacters))
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private func resetGenerationTracking() {
+        currentGeneration = nil
+        generationStartedAt = nil
+        consumedCharacters = 0
+        lastFullText = ""
     }
 
     // MARK: - Traducción
