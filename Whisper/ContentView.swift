@@ -208,7 +208,6 @@ struct LevelMeter: View {
             }
         }
         .frame(width: 140, height: 8)
-        .animation(.linear(duration: 0.08), value: level)
     }
 }
 

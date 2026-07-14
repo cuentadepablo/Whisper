@@ -49,6 +49,13 @@ final class TranscriptionViewModel: ObservableObject {
     private var segmentStartedAt: Date?
     private var monitorTask: Task<Void, Never>?
 
+    /// Último nivel de entrada crudo, escrito desde los callbacks de audio
+    /// (alta frecuencia) y publicado a `inputLevel` por `levelTask` a un ritmo
+    /// bajo, para no inundar a SwiftUI con notificaciones desde el hilo de
+    /// audio (eso provocaba "Publishing changes from within view updates").
+    private var latestRawLevel: Float = 0
+    private var levelTask: Task<Void, Never>?
+
     /// Pausa (en segundos) sin texto nuevo tras la cual se cierra el segmento.
     private let silenceThreshold: TimeInterval = 1.2
     /// Duración máxima de un segmento antes de forzar el corte (habla continua).
@@ -125,7 +132,7 @@ final class TranscriptionViewModel: ObservableObject {
                     transcriber.append(buffer)
                     let level = AudioLevelMeter.level(of: buffer)
                     DispatchQueue.main.async {
-                        MainActor.assumeIsolated { self?.updateInputLevel(level) }
+                        MainActor.assumeIsolated { self?.latestRawLevel = level }
                     }
                 }
                 microphoneSource = microphone
@@ -141,7 +148,7 @@ final class TranscriptionViewModel: ObservableObject {
                     transcriber.append(sampleBuffer)
                     let level = AudioLevelMeter.level(of: sampleBuffer)
                     DispatchQueue.main.async {
-                        MainActor.assumeIsolated { self?.updateInputLevel(level) }
+                        MainActor.assumeIsolated { self?.latestRawLevel = level }
                     }
                 }
                 systemSource = system
@@ -153,6 +160,7 @@ final class TranscriptionViewModel: ObservableObject {
                 ? "Escuchando el micrófono… hablá en inglés."
                 : "Capturando el audio del sistema… reproducí algo en inglés."
             startSegmentMonitor()
+            startLevelMeter()
         } catch {
             status = "No se pudo iniciar: \(error.localizedDescription)"
             cleanUp()
@@ -171,6 +179,7 @@ final class TranscriptionViewModel: ObservableObject {
     private func cleanUp() {
         monitorTask?.cancel()
         monitorTask = nil
+        stopLevelMeter()
         microphoneSource?.stop()
         microphoneSource = nil
         if let system = systemSource {
@@ -179,6 +188,28 @@ final class TranscriptionViewModel: ObservableObject {
         }
         transcriber?.stop()
         transcriber = nil
+    }
+
+    // MARK: - Vúmetro
+
+    /// Publica `inputLevel` a partir de `latestRawLevel` a ~12 fps, desde el
+    /// runloop principal (nunca desde el hilo de audio ni durante un update
+    /// de vista). Sube al instante y baja con inercia para que sea legible.
+    private func startLevelMeter() {
+        levelTask?.cancel()
+        levelTask = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .milliseconds(80))
+                guard let self else { return }
+                self.inputLevel = max(self.latestRawLevel, self.inputLevel * 0.7)
+            }
+        }
+    }
+
+    private func stopLevelMeter() {
+        levelTask?.cancel()
+        levelTask = nil
+        latestRawLevel = 0
         inputLevel = 0
     }
 
@@ -205,7 +236,7 @@ final class TranscriptionViewModel: ObservableObject {
             try microphone.start { [weak self] buffer in
                 let level = AudioLevelMeter.level(of: buffer)
                 DispatchQueue.main.async {
-                    MainActor.assumeIsolated { self?.updateInputLevel(level) }
+                    MainActor.assumeIsolated { self?.latestRawLevel = level }
                 }
             }
         } catch {
@@ -214,6 +245,7 @@ final class TranscriptionViewModel: ObservableObject {
         }
         micTestSource = microphone
         isMicTesting = true
+        startLevelMeter()
         status = "Prueba de micrófono: hablá y mirá el medidor. Si no se mueve, el micro no está captando."
     }
 
@@ -222,13 +254,8 @@ final class TranscriptionViewModel: ObservableObject {
         isMicTesting = false
         micTestSource?.stop()
         micTestSource = nil
-        inputLevel = 0
+        stopLevelMeter()
         status = "Prueba de micrófono terminada."
-    }
-
-    /// Suaviza el vúmetro: sube al instante, baja con una pequeña inercia.
-    private func updateInputLevel(_ level: Float) {
-        inputLevel = max(level, inputLevel * 0.75)
     }
 
     private func systemAudioStopped(_ error: Error?) {
