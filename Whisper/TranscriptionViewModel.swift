@@ -141,11 +141,14 @@ final class TranscriptionViewModel: ObservableObject {
                 }
                 let microphone = MicrophoneSource()
                 try microphone.start { [weak self] buffer in
-                    transcriber.append(buffer)
+                    // Nivel primero: el vúmetro no depende del reconocedor.
                     let level = AudioLevelMeter.level(of: buffer)
                     DispatchQueue.main.async {
                         MainActor.assumeIsolated { self?.latestRawLevel = level }
                     }
+                    // append() encola en la cola propia del transcriptor y
+                    // vuelve al instante: nunca bloquea el hilo de audio.
+                    transcriber.append(buffer)
                 }
                 microphoneSource = microphone
 
@@ -157,11 +160,12 @@ final class TranscriptionViewModel: ObservableObject {
                     }
                 }
                 try await system.start { [weak self] sampleBuffer in
-                    transcriber.append(sampleBuffer)
+                    // Nivel primero: el vúmetro no depende del reconocedor.
                     let level = AudioLevelMeter.level(of: sampleBuffer)
                     DispatchQueue.main.async {
                         MainActor.assumeIsolated { self?.latestRawLevel = level }
                     }
+                    transcriber.append(sampleBuffer)
                 }
                 systemSource = system
             }
