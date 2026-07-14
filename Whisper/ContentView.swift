@@ -103,8 +103,13 @@ struct ContentView: View {
                 }
             }
             .onChange(of: viewModel.segments) {
-                withAnimation(.easeOut(duration: 0.15)) {
-                    proxy.scrollTo("bottom", anchor: .bottom)
+                // Diferido al próximo ciclo del run loop: hacer scroll de forma
+                // síncrona dentro de onChange publica cambios en pleno view
+                // update ("Publishing changes from within view updates").
+                DispatchQueue.main.async {
+                    withAnimation(.easeOut(duration: 0.15)) {
+                        proxy.scrollTo("bottom", anchor: .bottom)
+                    }
                 }
             }
         }
