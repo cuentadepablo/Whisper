@@ -33,6 +33,9 @@ final class TranscriptionViewModel: ObservableObject {
     /// transcribe (columna española vacía) y no usa el framework Translation,
     /// que es lo que carga el hilo principal.
     @Published var translationEnabled = true
+    /// Contadores de diagnóstico visibles: si "audio" crece pero "resultados"
+    /// no, el audio fluye y el que calla es el reconocedor.
+    @Published var diagnostics = ""
 
     private var microphoneSource: MicrophoneSource?
     private var systemSource: SystemAudioSource?
@@ -59,6 +62,10 @@ final class TranscriptionViewModel: ObservableObject {
     /// audio (eso provocaba "Publishing changes from within view updates").
     private var latestRawLevel: Float = 0
     private var levelTask: Task<Void, Never>?
+
+    /// Contadores crudos para `diagnostics` (solo hilo principal).
+    private var buffersReceived = 0
+    private var resultsReceived = 0
 
     /// Freno de la traducción de parciales (el texto final nunca se frena).
     private var lastPartialTranslationAt = Date.distantPast
@@ -129,6 +136,11 @@ final class TranscriptionViewModel: ObservableObject {
                     self?.handleTaskEnd(generation, fullText)
                 }
             }
+            transcriber.onStatus = { [weak self] message in
+                MainActor.assumeIsolated {
+                    self?.status = message
+                }
+            }
             self.transcriber = transcriber
 
             switch sourceKind {
@@ -144,7 +156,10 @@ final class TranscriptionViewModel: ObservableObject {
                     // Nivel primero: el vúmetro no depende del reconocedor.
                     let level = AudioLevelMeter.level(of: buffer)
                     DispatchQueue.main.async {
-                        MainActor.assumeIsolated { self?.latestRawLevel = level }
+                        MainActor.assumeIsolated {
+                            self?.latestRawLevel = level
+                            self?.buffersReceived += 1
+                        }
                     }
                     // append() encola en la cola propia del transcriptor y
                     // vuelve al instante: nunca bloquea el hilo de audio.
@@ -163,13 +178,19 @@ final class TranscriptionViewModel: ObservableObject {
                     // Nivel primero: el vúmetro no depende del reconocedor.
                     let level = AudioLevelMeter.level(of: sampleBuffer)
                     DispatchQueue.main.async {
-                        MainActor.assumeIsolated { self?.latestRawLevel = level }
+                        MainActor.assumeIsolated {
+                            self?.latestRawLevel = level
+                            self?.buffersReceived += 1
+                        }
                     }
                     transcriber.append(sampleBuffer)
                 }
                 systemSource = system
             }
 
+            buffersReceived = 0
+            resultsReceived = 0
+            diagnostics = ""
             transcriber.start()
             isRunning = true
             status = sourceKind == .microphone
@@ -294,6 +315,7 @@ final class TranscriptionViewModel: ObservableObject {
     /// segmento abierto muestra solo la parte que todavía no fue consumida
     /// por segmentos cerrados anteriores.
     private func handlePartial(_ generation: UUID, _ fullText: String) {
+        resultsReceived += 1
         guard isRunning, !fullText.isEmpty else { return }
 
         if generation != currentGeneration {
@@ -359,6 +381,13 @@ final class TranscriptionViewModel: ObservableObject {
 
     private func checkSegmentBoundary() {
         guard isRunning else { return }
+
+        // Actualiza los contadores visibles (el monitor ya corre cada 400 ms,
+        // así que esto no agrega presión sobre SwiftUI).
+        let summary = "audio \(buffersReceived) · resultados \(resultsReceived)"
+        if summary != diagnostics {
+            diagnostics = summary
+        }
         let silence = lastPartialAt.map { Date().timeIntervalSince($0) } ?? 0
         let segmentAge = segmentStartedAt.map { Date().timeIntervalSince($0) } ?? 0
         let generationAge = generationStartedAt.map { Date().timeIntervalSince($0) } ?? 0

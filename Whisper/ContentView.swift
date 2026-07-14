@@ -184,6 +184,12 @@ struct ContentView: View {
             Text(viewModel.status)
                 .lineLimit(2)
             Spacer()
+            if !viewModel.diagnostics.isEmpty {
+                Text(viewModel.diagnostics)
+                    .font(.caption)
+                    .monospacedDigit()
+                    .help("Si \"audio\" crece pero \"resultados\" queda en 0, el audio fluye y el que no responde es el reconocedor de Apple.")
+            }
             if !viewModel.segments.isEmpty {
                 Text("\(viewModel.segments.count) segmentos")
                     .monospacedDigit()
