@@ -136,6 +136,11 @@ struct ContentView: View {
                     let length = viewModel.segments.reduce(0) { $0 + $1.english.count + $1.spanish.count }
                     guard length != lastScrolledLength else { continue }
                     lastScrolledLength = length
+                    // Un tick extra de por medio: ScrollViewReader.scrollTo
+                    // puede disparar "Publishing changes from within view
+                    // updates" si cae justo en medio de un ciclo de render de
+                    // SwiftUI; cediendo antes lo separa de ese ciclo.
+                    await Task.yield()
                     withAnimation(.easeOut(duration: 0.15)) {
                         proxy.scrollTo("bottom", anchor: .bottom)
                     }
