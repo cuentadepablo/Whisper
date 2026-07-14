@@ -67,10 +67,14 @@ final class TranscriptionViewModel: ObservableObject {
     /// Pausa (en segundos) sin texto nuevo tras la cual se cierra el segmento.
     private let silenceThreshold: TimeInterval = 1.2
     /// Duración máxima de un segmento antes de forzar el corte (habla continua).
-    private let maxSegmentDuration: TimeInterval = 20
-    /// Edad a partir de la cual, aprovechando un silencio, se rota la tarea de
-    /// reconocimiento para que no acumule minutos de audio.
-    private let maxGenerationDuration: TimeInterval = 50
+    private let maxSegmentDuration: TimeInterval = 12
+    /// Edad de la tarea de reconocimiento a partir de la cual se rota SÍ o SÍ,
+    /// aunque no haya silencio. `SFSpeechRecognizer` on-device reprocesa todo
+    /// el audio acumulado en cada parcial, así que dejar crecer la petición
+    /// hace que cada pasada sea más lenta y bloquee el hilo principal más
+    /// tiempo. Rotar seguido mantiene cada pasada corta y fluida; el buffer de
+    /// la transición evita perder audio.
+    private let maxGenerationDuration: TimeInterval = 12
 
     /// Cola de traducción con coalescencia: cada segmento guarda solo su texto
     /// más reciente. Si el traductor va más lento que los parciales, las
@@ -350,16 +354,25 @@ final class TranscriptionViewModel: ObservableObject {
     }
 
     private func checkSegmentBoundary() {
-        guard isRunning, openSegmentID != nil else { return }
+        guard isRunning else { return }
         let silence = lastPartialAt.map { Date().timeIntervalSince($0) } ?? 0
         let segmentAge = segmentStartedAt.map { Date().timeIntervalSince($0) } ?? 0
         let generationAge = generationStartedAt.map { Date().timeIntervalSince($0) } ?? 0
 
+        // Rotación por edad: prioritaria y sin esperar silencio, para que la
+        // petición de reconocimiento no acumule audio y siga siendo rápida.
+        if generationStartedAt != nil, generationAge > maxGenerationDuration {
+            cutSegmentLocally()
+            // Se limpia ya para no re-disparar la rotación mientras la tarea
+            // vieja termina de entregar su resultado final.
+            generationStartedAt = nil
+            transcriber?.rotate()
+            return
+        }
+
+        guard openSegmentID != nil else { return }
         if silence > silenceThreshold {
             cutSegmentLocally()
-            if generationAge > maxGenerationDuration {
-                transcriber?.rotate()
-            }
         } else if segmentAge > maxSegmentDuration {
             cutSegmentLocally()
         }
