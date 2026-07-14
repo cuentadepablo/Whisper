@@ -201,7 +201,13 @@ final class TranscriptionViewModel: ObservableObject {
             while !Task.isCancelled {
                 try? await Task.sleep(for: .milliseconds(80))
                 guard let self else { return }
-                self.inputLevel = max(self.latestRawLevel, self.inputLevel * 0.7)
+                let next = max(self.latestRawLevel, self.inputLevel * 0.7)
+                // Solo publicar si cambió de forma perceptible; si no, se
+                // evita invalidar la vista continuamente (incluso en silencio,
+                // el decaimiento republicaba sin fin).
+                if abs(next - self.inputLevel) > 0.01 {
+                    self.inputLevel = next
+                }
             }
         }
     }
