@@ -17,10 +17,12 @@ Todo el procesamiento es **100 % local**: no se envía nada a internet.
 El motor de reconocimiento corre de forma continua, sin detenerse nunca: los
 "subtítulos" se cortan localmente, partiendo el texto que crece cuando se
 detecta una pausa en el habla (~1,2 s sin palabras nuevas) o cuando el
-segmento supera los ~20 s de habla continua. Cortar un segmento no reinicia
-el reconocedor (reiniciarlo en cada pausa producía huecos y bloqueos); solo
-se rota la tarea de reconocimiento cada ~50 s como higiene, siempre
-aprovechando un silencio y guardando en buffer el audio de la transición.
+segmento supera los ~15 s de habla continua. Cortar un segmento no reinicia
+el reconocedor (reiniciarlo en cada pausa producía huecos y bloqueos); la
+tarea de reconocimiento se rota cada ~15 s, pero **solo aprovechando una
+pausa real** —el corte es invisible porque no se está diciendo nada en ese
+instante—, con un tope de seguridad a los 45 s por si se habla sin parar. El
+audio de la transición se guarda en buffer para no perder nada.
 
 Mientras hablás, el parcial se muestra en cursiva y se traduce en vivo a
 ritmo moderado (~2 por segundo): el modelo de traducción de Apple corre

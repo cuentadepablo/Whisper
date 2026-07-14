@@ -74,14 +74,18 @@ final class TranscriptionViewModel: ObservableObject {
     /// Pausa (en segundos) sin texto nuevo tras la cual se cierra el segmento.
     private let silenceThreshold: TimeInterval = 1.2
     /// Duración máxima de un segmento antes de forzar el corte (habla continua).
-    private let maxSegmentDuration: TimeInterval = 12
-    /// Edad de la tarea de reconocimiento a partir de la cual se rota SÍ o SÍ,
-    /// aunque no haya silencio. `SFSpeechRecognizer` on-device reprocesa todo
-    /// el audio acumulado en cada parcial, así que dejar crecer la petición
-    /// hace que cada pasada sea más lenta y bloquee el hilo principal más
-    /// tiempo. Rotar seguido mantiene cada pasada corta y fluida; el buffer de
-    /// la transición evita perder audio.
-    private let maxGenerationDuration: TimeInterval = 12
+    private let maxSegmentDuration: TimeInterval = 15
+    /// Edad a partir de la cual se PREFIERE rotar, pero solo aprovechando una
+    /// pausa real (silencio) — ahí el corte es invisible, porque no se está
+    /// diciendo nada en ese instante. Rotar sin esperar el silencio (como
+    /// hacía antes) corta el reconocimiento a mitad de frase: el audio de esa
+    /// ventana queda en buffer y no se pierde, pero no sale texto durante la
+    /// transición, y eso se siente como un freeze aunque no lo sea.
+    private let preferredRotationAge: TimeInterval = 15
+    /// Tope de seguridad: rota sí o sí a esta edad, aunque no haya pausa (caso
+    /// extremo de hablar sin parar nunca). Bastante más alto que el preferido
+    /// para que en la práctica casi siempre se rote durante un silencio.
+    private let maxGenerationDuration: TimeInterval = 45
 
     /// Cola de traducción con coalescencia: cada segmento guarda solo su texto
     /// más reciente. Si el traductor va más lento que los parciales, las
@@ -392,12 +396,11 @@ final class TranscriptionViewModel: ObservableObject {
         let segmentAge = segmentStartedAt.map { Date().timeIntervalSince($0) } ?? 0
         let generationAge = generationStartedAt.map { Date().timeIntervalSince($0) } ?? 0
 
-        // Rotación por edad: prioritaria y sin esperar silencio, para que la
-        // petición de reconocimiento no acumule audio y siga siendo rápida.
+        // Tope de seguridad: rota sí o sí, aunque no haya pausa. Solo pasa en
+        // el caso extremo de hablar sin parar más tiempo que
+        // `maxGenerationDuration`.
         if generationStartedAt != nil, generationAge > maxGenerationDuration {
             cutSegmentLocally()
-            // Se limpia ya para no re-disparar la rotación mientras la tarea
-            // vieja termina de entregar su resultado final.
             generationStartedAt = nil
             transcriber?.rotate()
             return
@@ -406,6 +409,12 @@ final class TranscriptionViewModel: ObservableObject {
         guard openSegmentID != nil else { return }
         if silence > silenceThreshold {
             cutSegmentLocally()
+            // La rotación "de rutina" solo ocurre acá, aprovechando esta
+            // pausa real: el corte es invisible porque no se está hablando.
+            if generationAge > preferredRotationAge {
+                generationStartedAt = nil
+                transcriber?.rotate()
+            }
         } else if segmentAge > maxSegmentDuration {
             cutSegmentLocally()
         }
