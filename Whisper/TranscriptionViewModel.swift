@@ -30,10 +30,10 @@ final class TranscriptionViewModel: ObservableObject {
     private var systemSource: SystemAudioSource?
     private var transcriber: SpeechTranscriber?
 
+    /// Generación (id de petición de reconocimiento) actualmente activa.
     private var currentSegmentID: UUID?
     private var lastPartialAt: Date?
     private var segmentStartedAt: Date?
-    private var finishingSegment = false
     private var monitorTask: Task<Void, Never>?
 
     /// Pausa (en segundos) sin texto nuevo tras la cual se cierra el segmento.
@@ -83,14 +83,14 @@ final class TranscriptionViewModel: ObservableObject {
 
             // SpeechTranscriber ya entrega los resultados en la cola principal;
             // assumeIsolated solo formaliza eso para el compilador.
-            transcriber.onPartial = { [weak self] text in
+            transcriber.onPartial = { [weak self] id, text in
                 MainActor.assumeIsolated {
-                    self?.handlePartial(text)
+                    self?.handlePartial(id, text)
                 }
             }
-            transcriber.onSegmentEnd = { [weak self] text in
+            transcriber.onSegmentEnd = { [weak self] id, text in
                 MainActor.assumeIsolated {
-                    self?.handleSegmentEnd(text)
+                    self?.handleSegmentEnd(id, text)
                 }
             }
             self.transcriber = transcriber
@@ -176,18 +176,18 @@ final class TranscriptionViewModel: ObservableObject {
 
     // MARK: - Resultados de reconocimiento
 
-    private func handlePartial(_ text: String) {
+    /// Un `id` nuevo (nunca visto) crea su fila y pasa a ser el segmento
+    /// activo. Los parciales de una generación que ya quedó atrás nunca
+    /// llegan acá: `SpeechTranscriber` los filtra antes de notificar.
+    private func handlePartial(_ id: UUID, _ text: String) {
         guard isRunning, !text.isEmpty else { return }
 
-        let id: UUID
-        if let current = currentSegmentID {
-            id = current
-        } else {
-            id = UUID()
+        if index(of: id) == nil {
+            segments.append(TranscriptSegment(id: id, english: "", spanish: "", isFinal: false))
+        }
+        if currentSegmentID != id {
             currentSegmentID = id
             segmentStartedAt = Date()
-            finishingSegment = false
-            segments.append(TranscriptSegment(id: id, english: "", spanish: "", isFinal: false))
         }
 
         guard let index = index(of: id) else { return }
@@ -200,19 +200,14 @@ final class TranscriptionViewModel: ObservableObject {
         enqueueTranslation(segmentID: id, text: text)
     }
 
-    private func handleSegmentEnd(_ text: String) {
-        finishingSegment = false
-        lastPartialAt = nil
-
-        guard let id = currentSegmentID else {
-            if !text.isEmpty {
-                let id = UUID()
-                segments.append(TranscriptSegment(id: id, english: text, spanish: "", isFinal: true))
-                enqueueTranslation(segmentID: id, text: text)
-            }
-            return
+    /// Llega para cualquier generación —viva o ya retirada— así que se
+    /// localiza y cierra por `id`, sin asumir que es la generación activa.
+    private func handleSegmentEnd(_ id: UUID, _ text: String) {
+        if currentSegmentID == id {
+            currentSegmentID = nil
+            segmentStartedAt = nil
+            lastPartialAt = nil
         }
-        currentSegmentID = nil
 
         guard let index = index(of: id) else { return }
         let finalText = text.isEmpty ? segments[index].english : text
@@ -226,8 +221,9 @@ final class TranscriptionViewModel: ObservableObject {
     }
 
     /// Vigila las pausas del habla: si no llegó texto nuevo por un rato (o el
-    /// segmento se hizo demasiado largo), cierra el segmento para obtener el
-    /// resultado final y arrancar uno nuevo. Así se forman los "subtítulos".
+    /// segmento se hizo demasiado largo), rota a una petición nueva. Así se
+    /// forman los "subtítulos", sin que el audio deje de tener destino en
+    /// ningún momento (ver comentario en `SpeechTranscriber.finishCurrentSegment`).
     private func startSegmentMonitor() {
         monitorTask = Task { [weak self] in
             while !Task.isCancelled {
@@ -238,11 +234,15 @@ final class TranscriptionViewModel: ObservableObject {
     }
 
     private func checkSegmentBoundary() {
-        guard isRunning, !finishingSegment, currentSegmentID != nil else { return }
+        guard isRunning, currentSegmentID != nil else { return }
         let silence = lastPartialAt.map { Date().timeIntervalSince($0) } ?? 0
         let duration = segmentStartedAt.map { Date().timeIntervalSince($0) } ?? 0
         if silence > silenceThreshold || duration > maxSegmentDuration {
-            finishingSegment = true
+            // Se desprende del segmento actual ya mismo: su resultado final
+            // llegará más tarde por handleSegmentEnd, identificado por su id.
+            currentSegmentID = nil
+            segmentStartedAt = nil
+            lastPartialAt = nil
             transcriber?.finishCurrentSegment()
         }
     }

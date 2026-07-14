@@ -11,8 +11,9 @@ struct ContentView: View {
         target: Locale.Language(identifier: "es-ES")
     )
 
-    /// Coalesce ráfagas de parciales (varios por frame) en un solo scroll.
-    @State private var scrollTask: Task<Void, Never>?
+    /// Última cantidad de caracteres vista, para saber si hay contenido nuevo
+    /// que justifique hacer scroll (ver `transcript`).
+    @State private var lastScrolledLength = 0
 
     var body: some View {
         VStack(spacing: 0) {
@@ -105,15 +106,18 @@ struct ContentView: View {
                     )
                 }
             }
-            .onChange(of: viewModel.segments) {
-                // Los parciales pueden mutar el array varias veces por frame;
-                // se cancela cualquier scroll pendiente y se reprograma, así
-                // una ráfaga termina en un solo scrollTo en vez de disparar
-                // "tried to update multiple times per frame".
-                scrollTask?.cancel()
-                scrollTask = Task { @MainActor in
-                    try? await Task.sleep(for: .milliseconds(50))
-                    guard !Task.isCancelled else { return }
+            .task {
+                // Con la traducción en vivo, el array de segmentos puede
+                // mutar muchas veces por frame; enganchar el scroll a
+                // onChange en ese régimen dispara el diagnóstico de SwiftUI
+                // "tried to update multiple times per frame". En cambio, este
+                // bucle vigila el contenido a un ritmo propio, desacoplado de
+                // cuántas veces mute el modelo.
+                while !Task.isCancelled {
+                    try? await Task.sleep(for: .milliseconds(120))
+                    let length = viewModel.segments.reduce(0) { $0 + $1.english.count + $1.spanish.count }
+                    guard length != lastScrolledLength else { continue }
+                    lastScrolledLength = length
                     withAnimation(.easeOut(duration: 0.15)) {
                         proxy.scrollTo("bottom", anchor: .bottom)
                     }
