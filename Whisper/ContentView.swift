@@ -44,6 +44,16 @@ struct ContentView: View {
             .fixedSize()
             .disabled(viewModel.isRunning)
 
+            Button {
+                Task { await viewModel.toggleMicTest() }
+            } label: {
+                Label(
+                    viewModel.isMicTesting ? "Detener prueba" : "Probar micro",
+                    systemImage: "mic.and.signal.meter"
+                )
+            }
+            .disabled(viewModel.isRunning)
+
             Spacer()
 
             Button {
@@ -145,11 +155,21 @@ struct ContentView: View {
     // MARK: - Estado
 
     private var statusBar: some View {
-        HStack {
+        HStack(spacing: 10) {
             if viewModel.isRunning {
                 Image(systemName: "waveform")
                     .symbolEffect(.variableColor.iterative)
                     .foregroundStyle(.red)
+            }
+            if viewModel.isRunning || viewModel.isMicTesting {
+                HStack(spacing: 6) {
+                    Image(systemName: viewModel.isMicTesting || viewModel.sourceKind == .microphone
+                        ? "mic.fill"
+                        : "speaker.wave.2.fill")
+                        .font(.caption)
+                    LevelMeter(level: viewModel.inputLevel)
+                }
+                .help("Nivel de entrada: si no se mueve, no está llegando audio.")
             }
             Text(viewModel.status)
                 .lineLimit(2)
@@ -163,6 +183,32 @@ struct ContentView: View {
         .foregroundStyle(.secondary)
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
+    }
+}
+
+/// Vúmetro horizontal: barra que se llena de verde a rojo según el nivel de
+/// entrada (0…1). Su función es validar de un vistazo que el audio llega.
+struct LevelMeter: View {
+    var level: Float
+
+    var body: some View {
+        GeometryReader { geometry in
+            ZStack(alignment: .leading) {
+                Capsule()
+                    .fill(.quaternary)
+                Capsule()
+                    .fill(
+                        LinearGradient(
+                            colors: [.green, .green, .yellow, .red],
+                            startPoint: .leading,
+                            endPoint: .trailing
+                        )
+                    )
+                    .frame(width: geometry.size.width * CGFloat(min(max(level, 0), 1)))
+            }
+        }
+        .frame(width: 140, height: 8)
+        .animation(.linear(duration: 0.08), value: level)
     }
 }
 

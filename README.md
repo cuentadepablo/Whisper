@@ -47,6 +47,12 @@ el segmento se traduce la frase completa definitiva.
 
 ### Primer uso
 
+- **Probar micro** (opcional): enciende solo el micrófono y muestra un
+  vúmetro en la barra de estado, sin transcribir nada. Si la barra se mueve
+  al hablar, la señal llega bien; si queda quieta, revisá el permiso de
+  micrófono o el dispositivo de entrada seleccionado en Ajustes → Sonido.
+  El mismo vúmetro se muestra también durante la captura normal (micrófono
+  o audio del sistema), así siempre se ve si está entrando audio.
 - Elegí la fuente en el selector: **Micrófono** o **Audio del sistema**.
 - Presioná **Iniciar** (o ⌘Espacio). Hablá en inglés o reproducí un video
   en inglés.

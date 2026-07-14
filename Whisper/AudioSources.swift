@@ -1,5 +1,44 @@
+import Accelerate
 import AVFoundation
+import CoreMedia
 import ScreenCaptureKit
+
+/// Nivel de entrada (0…1) a partir del RMS de un buffer, mapeando el rango
+/// útil de -50 dB…0 dB. Sirve para el vúmetro que valida que el audio llega.
+enum AudioLevelMeter {
+    static func level(of buffer: AVAudioPCMBuffer) -> Float {
+        guard let channelData = buffer.floatChannelData, buffer.frameLength > 0 else { return 0 }
+        var rms: Float = 0
+        vDSP_rmsqv(channelData[0], 1, &rms, vDSP_Length(buffer.frameLength))
+        return normalized(rms: rms)
+    }
+
+    static func level(of sampleBuffer: CMSampleBuffer) -> Float {
+        guard let blockBuffer = CMSampleBufferGetDataBuffer(sampleBuffer) else { return 0 }
+        var totalLength = 0
+        var dataPointer: UnsafeMutablePointer<CChar>?
+        let status = CMBlockBufferGetDataPointer(
+            blockBuffer,
+            atOffset: 0,
+            lengthAtOffsetOut: nil,
+            totalLengthOut: &totalLength,
+            dataPointerOut: &dataPointer
+        )
+        guard status == kCMBlockBufferNoErr, let dataPointer else { return 0 }
+        let count = totalLength / MemoryLayout<Float>.size
+        guard count > 0 else { return 0 }
+        var rms: Float = 0
+        dataPointer.withMemoryRebound(to: Float.self, capacity: count) { samples in
+            vDSP_rmsqv(samples, 1, &rms, vDSP_Length(count))
+        }
+        return normalized(rms: rms)
+    }
+
+    private static func normalized(rms: Float) -> Float {
+        let decibels = 20 * log10(max(rms, 1e-7))
+        return min(1, max(0, (decibels + 50) / 50))
+    }
+}
 
 enum WhisperError: LocalizedError {
     case noMicrophone

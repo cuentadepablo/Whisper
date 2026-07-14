@@ -25,9 +25,14 @@ final class TranscriptionViewModel: ObservableObject {
     @Published var isRunning = false
     @Published var sourceKind: AudioSourceKind = .microphone
     @Published var status = "Listo. Elegí la fuente de audio y presioná Iniciar."
+    /// Nivel de entrada (0…1) para el vúmetro, tanto en captura normal como
+    /// en el modo de prueba de micrófono.
+    @Published var inputLevel: Float = 0
+    @Published var isMicTesting = false
 
     private var microphoneSource: MicrophoneSource?
     private var systemSource: SystemAudioSource?
+    private var micTestSource: MicrophoneSource?
     private var transcriber: SpeechTranscriber?
 
     /// Generación (id de petición de reconocimiento) actualmente activa.
@@ -66,6 +71,7 @@ final class TranscriptionViewModel: ObservableObject {
 
     func start() async {
         guard !isRunning else { return }
+        if isMicTesting { stopMicTest() }
         status = "Pidiendo permisos…"
 
         let speechAuth = await requestSpeechAuthorization()
@@ -104,8 +110,12 @@ final class TranscriptionViewModel: ObservableObject {
                     return
                 }
                 let microphone = MicrophoneSource()
-                try microphone.start { buffer in
+                try microphone.start { [weak self] buffer in
                     transcriber.append(buffer)
+                    let level = AudioLevelMeter.level(of: buffer)
+                    DispatchQueue.main.async {
+                        MainActor.assumeIsolated { self?.updateInputLevel(level) }
+                    }
                 }
                 microphoneSource = microphone
 
@@ -116,8 +126,12 @@ final class TranscriptionViewModel: ObservableObject {
                         self?.systemAudioStopped(error)
                     }
                 }
-                try await system.start { sampleBuffer in
+                try await system.start { [weak self] sampleBuffer in
                     transcriber.append(sampleBuffer)
+                    let level = AudioLevelMeter.level(of: sampleBuffer)
+                    DispatchQueue.main.async {
+                        MainActor.assumeIsolated { self?.updateInputLevel(level) }
+                    }
                 }
                 systemSource = system
             }
@@ -164,6 +178,56 @@ final class TranscriptionViewModel: ObservableObject {
         }
         transcriber?.stop()
         transcriber = nil
+        inputLevel = 0
+    }
+
+    // MARK: - Prueba de micrófono
+
+    /// Enciende solo el micrófono (sin reconocimiento ni traducción) y
+    /// publica el nivel de entrada, para validar que la señal llega antes de
+    /// arrancar una sesión de transcripción.
+    func toggleMicTest() async {
+        if isMicTesting {
+            stopMicTest()
+            return
+        }
+        guard !isRunning else { return }
+
+        let granted = await AVCaptureDevice.requestAccess(for: .audio)
+        guard granted else {
+            status = "Permiso de micrófono denegado. Activalo en Ajustes del Sistema → Privacidad y seguridad → Micrófono."
+            return
+        }
+
+        let microphone = MicrophoneSource()
+        do {
+            try microphone.start { [weak self] buffer in
+                let level = AudioLevelMeter.level(of: buffer)
+                DispatchQueue.main.async {
+                    MainActor.assumeIsolated { self?.updateInputLevel(level) }
+                }
+            }
+        } catch {
+            status = "No se pudo iniciar la prueba de micrófono: \(error.localizedDescription)"
+            return
+        }
+        micTestSource = microphone
+        isMicTesting = true
+        status = "Prueba de micrófono: hablá y mirá el medidor. Si no se mueve, el micro no está captando."
+    }
+
+    func stopMicTest() {
+        guard isMicTesting else { return }
+        isMicTesting = false
+        micTestSource?.stop()
+        micTestSource = nil
+        inputLevel = 0
+        status = "Prueba de micrófono terminada."
+    }
+
+    /// Suaviza el vúmetro: sube al instante, baja con una pequeña inercia.
+    private func updateInputLevel(_ level: Float) {
+        inputLevel = max(level, inputLevel * 0.75)
     }
 
     private func systemAudioStopped(_ error: Error?) {
