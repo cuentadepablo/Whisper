@@ -15,10 +15,12 @@ Todo el procesamiento es **100 % local**: no se envía nada a internet.
 | Traducción (EN→ES) | `Translation` / `TranslationSession` | Traducción local con los modelos de Apple |
 
 La app corta el texto en segmentos cuando detecta una pausa en el habla
-(~2 s sin palabras nuevas): en ese momento el segmento se marca como final,
+(~1,2 s sin palabras nuevas): en ese momento el segmento se marca como final,
 se traduce y empieza uno nuevo. Mientras hablás, el parcial se muestra en
-cursiva y se va traduciendo de forma aproximada; al cerrarse el segmento se
-traduce la frase completa.
+cursiva y se traduce en vivo: cada actualización se manda al traductor de
+inmediato, y una cola con coalescencia descarta las versiones que quedaron
+viejas para que la traducción nunca se atrase respecto del habla. Al cerrarse
+el segmento se traduce la frase completa definitiva.
 
 ## Requisitos
 

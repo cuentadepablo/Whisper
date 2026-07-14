@@ -34,24 +34,24 @@ final class TranscriptionViewModel: ObservableObject {
     private var lastPartialAt: Date?
     private var segmentStartedAt: Date?
     private var finishingSegment = false
-    private var lastPartialTranslationAt = Date.distantPast
     private var monitorTask: Task<Void, Never>?
 
     /// Pausa (en segundos) sin texto nuevo tras la cual se cierra el segmento.
-    private let silenceThreshold: TimeInterval = 1.8
+    private let silenceThreshold: TimeInterval = 1.2
     /// Duración máxima de un segmento antes de forzar el cierre.
     private let maxSegmentDuration: TimeInterval = 45
 
-    private struct TranslationJob {
-        let segmentID: UUID
-        let text: String
-    }
-
-    private let jobs: AsyncStream<TranslationJob>
-    private let jobsContinuation: AsyncStream<TranslationJob>.Continuation
+    /// Cola de traducción con coalescencia: cada segmento guarda solo su texto
+    /// más reciente. Si el traductor va más lento que los parciales, las
+    /// versiones intermedias se descartan en vez de encolarse, así la
+    /// traducción nunca acumula atraso.
+    private var pendingTranslations: [UUID: String] = [:]
+    private var pendingOrder: [UUID] = []
+    private let wakeups: AsyncStream<Void>
+    private let wakeupsContinuation: AsyncStream<Void>.Continuation
 
     init() {
-        (jobs, jobsContinuation) = AsyncStream.makeStream(of: TranslationJob.self)
+        (wakeups, wakeupsContinuation) = AsyncStream.makeStream(of: Void.self)
     }
 
     // MARK: - Iniciar / detener
@@ -194,12 +194,10 @@ final class TranscriptionViewModel: ObservableObject {
         segments[index].english = text
         lastPartialAt = Date()
 
-        // Traducción "en vivo" del parcial, con un pequeño freno para no
-        // saturar al traductor con cada palabra.
-        if Date().timeIntervalSince(lastPartialTranslationAt) > 1.2 {
-            lastPartialTranslationAt = Date()
-            enqueueTranslation(segmentID: id, text: text)
-        }
+        // Traducción "en vivo": cada parcial se manda al traductor de
+        // inmediato; la coalescencia de la cola se encarga de descartar las
+        // versiones que queden obsoletas antes de ser procesadas.
+        enqueueTranslation(segmentID: id, text: text)
     }
 
     private func handleSegmentEnd(_ text: String) {
@@ -263,20 +261,31 @@ final class TranscriptionViewModel: ObservableObject {
             status = "No se pudieron preparar los idiomas de traducción: \(error.localizedDescription)"
         }
 
-        for await job in jobs {
-            do {
-                let response = try await session.translate(job.text)
-                if let index = index(of: job.segmentID) {
-                    segments[index].spanish = response.targetText
+        for await _ in wakeups {
+            // Drenar todo lo pendiente; mientras un translate() está en vuelo
+            // pueden llegar textos nuevos, que este mismo while recoge.
+            while !pendingOrder.isEmpty {
+                let id = pendingOrder.removeFirst()
+                guard let text = pendingTranslations.removeValue(forKey: id) else { continue }
+                do {
+                    let response = try await session.translate(text)
+                    if let index = index(of: id) {
+                        segments[index].spanish = response.targetText
+                    }
+                } catch {
+                    status = "Error de traducción: \(error.localizedDescription)"
                 }
-            } catch {
-                status = "Error de traducción: \(error.localizedDescription)"
             }
         }
     }
 
     private func enqueueTranslation(segmentID: UUID, text: String) {
-        jobsContinuation.yield(TranslationJob(segmentID: segmentID, text: text))
+        // Si el segmento ya estaba en cola, solo se reemplaza su texto por el
+        // más nuevo; no se duplica la entrada.
+        if pendingTranslations.updateValue(text, forKey: segmentID) == nil {
+            pendingOrder.append(segmentID)
+        }
+        wakeupsContinuation.yield()
     }
 
     // MARK: - Guardar
